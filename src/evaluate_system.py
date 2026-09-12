@@ -56,7 +56,7 @@ def plot_error_distribution(y_true_baseline, y_pred_baseline, y_true_glycosight,
     ax.set_title('Distribution of Prediction Errors at 60 Minutes')
     ax.set_ylabel('Prediction Error (Predicted - Actual BG in mg/dL)')
     ax.yaxis.grid(True, linestyle='--', which='major', color='grey', alpha=0.5)
-    ax.axhline(0, color='red', linestyle='--', linewidth=1)  # Add a line at zero error
+    ax.axhline(0, color='red', linestyle='--', linewidth=1)
 
     plt.savefig(save_path, format='pdf', bbox_inches='tight')
     plt.close()
@@ -70,9 +70,9 @@ def get_image_for_meal(project_root):
     return placeholder_path
 
 
-
 def main(args):
-    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Fixed project root depth resolution
+    PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
     hfa_model_path = os.path.join(PROJECT_ROOT, args.hfa_model_name)
     transformer_model_path = os.path.join(PROJECT_ROOT, args.transformer_model_name)
     test_data_path = os.path.join(PROJECT_ROOT, 'processed_data', f'processed_patient_{args.test_patient_id}.csv')
@@ -111,6 +111,11 @@ def main(args):
             start_idx_loc = end_idx_loc - args.look_back
 
             if start_idx_loc < 0: continue
+            
+            # Ensure sequence length is valid before testing
+            future_df = test_data.iloc[end_idx_loc : end_idx_loc + args.predict_horizon]
+            if len(future_df) < args.predict_horizon: 
+                continue
 
             history_df = test_data.iloc[start_idx_loc:end_idx_loc]
 
@@ -150,7 +155,6 @@ def main(args):
 
     if len(y_true) == 0:
         print("\n--- ERROR: No valid meal events found with sufficient future data. ---")
-        print("Please try a different patient file (e.g., a 'training' file). The 'testing' files are often too short.")
         return
 
     valid_indices = y_true > 20
@@ -167,13 +171,18 @@ def main(args):
 
     plot_error_distribution(y_true, y_pred_baseline, y_true, y_pred,
                              os.path.join(results_dir, 'figures', 'error_dist_plot.pdf'))
-
-
-
     plot_cega(y_true, y_pred, 'GlycoSIGHT-CFP', os.path.join(results_dir, 'figures', 'cega_plot.pdf'))
 
+    # Plot specific index boundary checking
     example_timestamp = meal_indices[len(meal_indices) // 2]
     end_loc = test_data.index.get_loc(example_timestamp)
+    if len(test_data.iloc[end_loc : end_loc + args.predict_horizon]) != args.predict_horizon:
+        for ts in meal_indices:
+            end_loc = test_data.index.get_loc(ts)
+            if len(test_data.iloc[end_loc : end_loc + args.predict_horizon]) == args.predict_horizon:
+                example_timestamp = ts
+                break
+
     start_loc = end_loc - args.look_back
     history_df, future_df = test_data.iloc[start_loc:end_loc], test_data.iloc[end_loc: end_loc + args.predict_horizon]
     history_real, true_future_real = scaler.inverse_transform(history_df[['glucose']]), scaler.inverse_transform(

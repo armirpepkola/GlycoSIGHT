@@ -8,15 +8,14 @@ from torchvision import transforms
 
 import sys
 
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 from models import HierarchicalFoodAnalysis, NutrientAwareTransformer
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 @st.cache_resource
 def load_models():
-    device = torch.device("cpu")
-
     hfa_model_path = 'best_hfa_model.pth'
     transformer_model_path = 'best_transformer_model.pth'
 
@@ -75,11 +74,17 @@ if hfa_model is not None and transformer_model is not None:
                     transforms.Resize((256, 256)), transforms.ToTensor(),
                     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
                 ])
-                img_tensor = transform(image).unsqueeze(0)
+                # Assign image to proper hardware device
+                img_tensor = transform(image).unsqueeze(0).to(device)
                 with torch.no_grad():
                     hfa_output = hfa_model(img_tensor)
 
-                c, f, p = [50.0, 15.0, 20.0]
+                # Extract dynamic macronutrients instead of using hardcoded metrics
+                class_probs = hfa_output['classification'][0].cpu().numpy()
+                volumes = hfa_output['volume'][0].cpu().numpy()
+                c = float(np.sum(class_probs * volumes * 0.5))
+                f = float(np.sum(class_probs * volumes * 0.2))
+                p = float(np.sum(class_probs * volumes * 0.3))
 
                 with col1:
                     st.metric("Estimated Carbohydrates", f"{c:.1f} g")
@@ -87,17 +92,30 @@ if hfa_model is not None and transformer_model is not None:
                     st.metric("Estimated Protein", f"{p:.1f} g")
 
                 try:
-                    cgm_history = np.array([float(val.strip()) for val in cgm_history_text.split(',')])
+                    cgm_raw = np.array([float(val.strip()) for val in cgm_history_text.split(',')])
+                    
+                    # Pad or truncate CGM window to exactly 36 elements
+                    if len(cgm_raw) < 36:
+                        cgm_history = np.pad(cgm_raw, (36 - len(cgm_raw), 0), 'edge')
+                    elif len(cgm_raw) > 36:
+                        cgm_history = cgm_raw[-36:]
+                    else:
+                        cgm_history = cgm_raw
+
+                    min_glucose, max_glucose = 40.0, 400.0
                     src = np.zeros((len(cgm_history), 5))
-                    src[:, 0] = cgm_history / 100.0
+                    
+                    # Apply standard Min-Max scaling
+                    src[:, 0] = (cgm_history - min_glucose) / (max_glucose - min_glucose)
                     src[-1, 2:] = [c / 100.0, f / 100.0, p / 100.0]
 
                     with torch.no_grad():
-                        src_tensor = torch.FloatTensor(src).unsqueeze(0)
-                        tgt_tensor = torch.zeros((1, 24, 1))
+                        src_tensor = torch.FloatTensor(src).unsqueeze(0).to(device)
+                        tgt_tensor = torch.zeros((1, 24, 1)).to(device)
                         prediction = transformer_model(src_tensor, tgt_tensor)
 
-                    predicted_glucose = (prediction[0, :, 0].numpy() * 100) + cgm_history[-1]
+                    # Unscale glucose appropriately without adding baseline value
+                    predicted_glucose = prediction[0, :, 0].cpu().numpy() * (max_glucose - min_glucose) + min_glucose
 
                     with col2:
                         fig = go.Figure()
@@ -109,5 +127,5 @@ if hfa_model is not None and transformer_model is not None:
                         fig.update_layout(xaxis_title="Time (5-min steps from now)", yaxis_title="Glucose (mg/dL)")
                         st.plotly_chart(fig, use_container_width=True)
 
-                except Exception:
-                    st.error("Failed to process CGM data. Please ensure it's a comma-separated list of numbers.")
+                except Exception as e:
+                    st.error(f"Failed to process CGM data. Error: {e}")

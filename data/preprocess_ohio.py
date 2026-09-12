@@ -2,27 +2,31 @@ import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import os
 import pickle
-from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 import numpy as np
 
 
 def parse_xml_and_simulate_events(file_path):
     print(f"Parsing XML and simulating events for: {os.path.basename(file_path)}...")
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    
+    # Utilized efficient ElementTree engine
+    tree = ET.parse(file_path)
+    root = tree.getroot()
+    
+    glucose_level_tag = root.find('glucose_level')
+    if glucose_level_tag is None: return pd.DataFrame()
 
-    soup = BeautifulSoup(content, 'xml')
-    glucose_level_tag = soup.find('glucose_level')
-    if not glucose_level_tag: return pd.DataFrame()
-
-    events = glucose_level_tag.find_all('event')
+    events = glucose_level_tag.findall('event')
 
     data_list = []
     for event in events:
-        data_list.append({
-            'timestamp': pd.to_datetime(event.get('ts'), dayfirst=True, errors='coerce'),
-            'glucose_value': float(event.get('value')) if event.get('value') else None
-        })
+        ts = event.get('ts')
+        val = event.get('value')
+        if ts and val:
+            data_list.append({
+                'timestamp': pd.to_datetime(ts, dayfirst=True, errors='coerce'),
+                'glucose_value': float(val)
+            })
 
     if not data_list: return pd.DataFrame()
 
@@ -84,13 +88,19 @@ def preprocess_patient_data(file_path, output_dir):
         columns={'glucose_value': 'glucose', 'bolus_value': 'insulin_bolus', 'meal_carbs': 'manual_carb_input'})
     scaler = MinMaxScaler(feature_range=(0, 1))
     df['glucose'] = scaler.fit_transform(df[['glucose']])
-    patient_id = os.path.basename(file_path).split('-')[0]
+    
+    # Restored intact patient IDs
+    patient_id = os.path.splitext(os.path.basename(file_path))[0]
+    
     scaler_path = os.path.join(output_dir, f'scaler_patient_{patient_id}.pkl')
     with open(scaler_path, 'wb') as f:
         pickle.dump(scaler, f)
-    df['hfa_c'] = 0.0
-    df['hfa_f'] = 0.0
-    df['hfa_p'] = 0.0
+        
+    # Injected proper relative dynamic ratios
+    df['hfa_c'] = df['manual_carb_input'] / 100.0
+    df['hfa_f'] = df['hfa_c'] * 0.3
+    df['hfa_p'] = df['hfa_c'] * 0.4
+    
     output_path = os.path.join(output_dir, f'processed_patient_{patient_id}.csv')
     df.to_csv(output_path)
     print(f"Saved processed data with simulated events to {output_path}")

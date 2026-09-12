@@ -5,10 +5,7 @@ import timm
 import math
 
 
-# HIERARCHICAL FOOD ANALYSIS
-
 class DecoderBlock(nn.Module):
-
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
@@ -26,7 +23,6 @@ class DecoderBlock(nn.Module):
 
 
 class HierarchicalFoodAnalysis(nn.Module):
-
     def __init__(self, num_food_classes=102, pretrained=True):
         super().__init__()
         self.num_classes = num_food_classes
@@ -44,6 +40,8 @@ class HierarchicalFoodAnalysis(nn.Module):
         self.decoder_block4 = DecoderBlock(64 + encoder_channels[0], 32)
 
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        # Added final upsampling block to synchronize segmentation map against ground truth
+        self.final_upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
         self.segmentation_head = nn.Conv2d(32, self.num_classes, kernel_size=1)
 
         self.global_pool = nn.AdaptiveAvgPool2d(1)
@@ -79,6 +77,8 @@ class HierarchicalFoodAnalysis(nn.Module):
         d4 = self.upsample(d3)
         d4 = self.decoder_block4(d4, s0)
 
+        # Utilize secondary upsample sequence
+        d4 = self.final_upsample(d4)
         segmentation_logits = self.segmentation_head(d4)
 
         pooled_features = self.global_pool(s4)
@@ -91,8 +91,6 @@ class HierarchicalFoodAnalysis(nn.Module):
             'volume': volume_estimates
         }
 
-
-# NUTRIENT AWARE TRANSFORMER MODULE
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
@@ -115,33 +113,29 @@ class NutrientAwareTransformer(nn.Module):
                  dim_feedforward=512, dropout=0.2, num_features=5, output_seq_len=24):
         super().__init__()
         self.d_model = d_model
+        self.output_seq_len = output_seq_len
 
         self.feature_embeddings = nn.ModuleList([nn.Linear(1, d_model) for _ in range(num_features)])
         self.positional_encoder = PositionalEncoding(d_model, dropout)
 
-        self.transformer = nn.Transformer(
-            d_model=d_model, nhead=nhead, num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers, dim_feedforward=dim_feedforward,
-            dropout=dropout, batch_first=False
+        # Transitioning to an encoder-only architectural pattern removes dependencies on multi-horizon target sequences
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout
         )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
 
-        self.output_layer = nn.Linear(d_model, 1)
-        self.output_seq_len = output_seq_len
+        self.output_layer = nn.Linear(d_model, output_seq_len)
 
-    def forward(self, src, tgt):
+    def forward(self, src, tgt=None):
         src = src.permute(1, 0, 2)
-        tgt = tgt.permute(1, 0, 2)
 
         embedded_src_list = [self.feature_embeddings[i](src[:, :, i].unsqueeze(-1)) for i in range(src.shape[2])]
         embedded_src = torch.stack(embedded_src_list).sum(dim=0)
         embedded_src = self.positional_encoder(embedded_src * math.sqrt(self.d_model))
 
-        embedded_tgt = self.feature_embeddings[0](tgt)
-        embedded_tgt = self.positional_encoder(embedded_tgt * math.sqrt(self.d_model))
+        memory = self.transformer_encoder(embedded_src)
+        
+        last_step = memory[-1, :, :]
+        prediction = self.output_layer(last_step).unsqueeze(-1)
 
-        tgt_mask = self.transformer.generate_square_subsequent_mask(tgt.size(0)).to(src.device)
-
-        transformer_out = self.transformer(embedded_src, embedded_tgt, tgt_mask=tgt_mask)
-        prediction = self.output_layer(transformer_out)
-
-        return prediction.permute(1, 0, 2)
+        return prediction
